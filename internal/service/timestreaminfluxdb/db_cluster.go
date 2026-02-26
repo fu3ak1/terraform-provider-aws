@@ -598,6 +598,57 @@ func isParameterGroupV3(ctx context.Context, conn *timestreaminfluxdb.Client, pa
 	}
 }
 
+func validateDBClusterV2V3Fields(data dbClusterResourceModel, isV3Cluster bool) diag.Diagnostics {
+	var diags diag.Diagnostics
+
+	isNullOrUnknown := func(val attr.Value) bool {
+		return val.IsNull() || val.IsUnknown()
+	}
+
+	if isV3Cluster {
+		for _, v := range []struct {
+			val  attr.Value
+			path string
+		}{
+			{data.AllocatedStorage, names.AttrAllocatedStorage},
+			{data.Bucket, names.AttrBucket},
+			{data.DeploymentType, "deployment_type"},
+			{data.Organization, "organization"},
+			{data.Password, names.AttrPassword},
+			{data.Username, names.AttrUsername},
+		} {
+			if !isNullOrUnknown(v.val) {
+				diags.AddAttributeError(
+					path.Root(v.path),
+					"Invalid Configuration for InfluxDB V3",
+					v.path+" must not be set when using an InfluxDB V3 db parameter group",
+				)
+			}
+		}
+	} else {
+		for _, v := range []struct {
+			val  attr.Value
+			path string
+		}{
+			{data.AllocatedStorage, names.AttrAllocatedStorage},
+			{data.Bucket, names.AttrBucket},
+			{data.Organization, "organization"},
+			{data.Password, names.AttrPassword},
+			{data.Username, names.AttrUsername},
+		} {
+			if isNullOrUnknown(v.val) {
+				diags.AddAttributeError(
+					path.Root(v.path),
+					"Missing Required Configuration for InfluxDB V2",
+					v.path+" is required for InfluxDB V2 clusters",
+				)
+			}
+		}
+	}
+
+	return diags
+}
+
 func (r *dbClusterResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var data dbClusterResourceModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
@@ -626,13 +677,6 @@ func (r *dbClusterResource) ValidateConfig(ctx context.Context, req resource.Val
 		}
 	}
 
-	hasV2Fields := !isNullOrUnknown(data.AllocatedStorage) ||
-		!isNullOrUnknown(data.Bucket) ||
-		!isNullOrUnknown(data.DeploymentType) ||
-		!isNullOrUnknown(data.Organization) ||
-		!isNullOrUnknown(data.Password) ||
-		!isNullOrUnknown(data.Username)
-
 	var isV3Cluster bool
 	if !isNullOrUnknown(data.DBParameterGroupIdentifier) {
 		meta := r.Meta()
@@ -647,55 +691,13 @@ func (r *dbClusterResource) ValidateConfig(ctx context.Context, req resource.Val
 		}
 		isV3Cluster = isV3
 
-		if !hasV2Fields && !isV3Cluster {
-			resp.Diagnostics.AddAttributeError(
-				path.Root("db_parameter_group_identifier"),
-				"Invalid Parameter Group Type",
-				"An InfluxDB V2 parameter group requires InfluxDB V2 fields (allocated_storage, bucket, deployment_type, organization, password, username). Use an InfluxDB V3 parameter group or provide the V2 fields.",
-			)
-		}
+		resp.Diagnostics.Append(validateDBClusterV2V3Fields(data, isV3Cluster)...)
+	} else if data.DBParameterGroupIdentifier.IsNull() {
+		// If no parameter group is specified, validate as V2(default)
+		resp.Diagnostics.Append(validateDBClusterV2V3Fields(data, false)...)
 	}
+	// If IsUnknown, we can't determine V2 or V3, so we skip validation. Pass validation to ModifyPlan.
 
-	if isV3Cluster {
-		for _, v := range []struct {
-			val  attr.Value
-			path string
-		}{
-			{data.AllocatedStorage, names.AttrAllocatedStorage},
-			{data.Bucket, names.AttrBucket},
-			{data.DeploymentType, "deployment_type"},
-			{data.Organization, "organization"},
-			{data.Password, names.AttrPassword},
-			{data.Username, names.AttrUsername},
-		} {
-			if !isNullOrUnknown(v.val) {
-				resp.Diagnostics.AddAttributeError(
-					path.Root(v.path),
-					"Invalid Configuration for InfluxDB V3",
-					v.path+" must not be set when using an InfluxDB V3 db parameter group",
-				)
-			}
-		}
-	} else {
-		for _, v := range []struct {
-			val  attr.Value
-			path string
-		}{
-			{data.AllocatedStorage, names.AttrAllocatedStorage},
-			{data.Bucket, names.AttrBucket},
-			{data.Organization, "organization"},
-			{data.Password, names.AttrPassword},
-			{data.Username, names.AttrUsername},
-		} {
-			if isNullOrUnknown(v.val) {
-				resp.Diagnostics.AddAttributeError(
-					path.Root(v.path),
-					"Missing Required Configuration for InfluxDB V2",
-					v.path+" is required for InfluxDB V2 clusters",
-				)
-			}
-		}
-	}
 }
 
 func (r *dbClusterResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
@@ -714,6 +716,8 @@ func (r *dbClusterResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 				return
 			}
 			isV3Cluster = isV3
+
+			resp.Diagnostics.Append(validateDBClusterV2V3Fields(data, isV3Cluster)...)
 		}
 
 		if !isV3Cluster && data.DeploymentType.IsUnknown() {
